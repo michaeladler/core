@@ -4,7 +4,10 @@ use tracing::{debug, info};
 
 use super::MoveMessages;
 use crate::{
-    email::error::Error, envelope::Id, folder::FolderKind, notmuch::NotmuchContextSync, AnyResult,
+    email::error::Error,
+    envelope::Id,
+    notmuch::{build_folder_query, is_raw_notmuch_query, NotmuchContextSync},
+    AnyResult,
 };
 
 #[derive(Clone)]
@@ -34,17 +37,21 @@ impl MoveMessages for MoveNotmuchMessages {
         let config = &self.ctx.account_config;
         let ctx = self.ctx.lock().await;
 
+        let resolved_to = config.get_folder_alias(to_folder);
+        if is_raw_notmuch_query(&resolved_to) {
+            return Err(Error::NotmuchVirtualFolderWrite(
+                to_folder.to_owned(),
+                resolved_to,
+            ))?;
+        }
+
         let mdir_ctx = &ctx.mdir_ctx;
         let mdir_to = mdir_ctx.get_maildir_from_folder_alias(to_folder)?;
 
         let db = ctx.open_db()?;
 
         let ref from_folder = config.get_folder_alias(from_folder);
-        let folder_query = if ctx.maildirpp() && FolderKind::matches_inbox(from_folder) {
-            String::from("folder:\"\"")
-        } else {
-            format!("folder:{from_folder:?}")
-        };
+        let folder_query = build_folder_query(config, ctx.maildirpp(), from_folder);
         let mid_query = format!("mid:\"/^({})$/\"", id.join("|"));
         let query = [folder_query, mid_query].join(" and ");
         let query_builder = db.create_query(&query).map_err(Error::NotMuchFailure)?;

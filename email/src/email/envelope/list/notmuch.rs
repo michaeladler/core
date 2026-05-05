@@ -5,8 +5,7 @@ use tracing::{debug, info, trace};
 use super::{Envelopes, ListEnvelopes, ListEnvelopesOptions};
 use crate::{
     email::error::Error,
-    folder::FolderKind,
-    notmuch::NotmuchContextSync,
+    notmuch::{build_folder_query, NotmuchContextSync},
     search_query::{filter::SearchEmailsFilterQuery, SearchEmailsQuery},
     AnyResult,
 };
@@ -44,16 +43,16 @@ impl ListEnvelopes for ListNotmuchEnvelopes {
         let db = ctx.open_db()?;
 
         let ref folder = config.get_folder_alias(folder);
-        let mut final_query = if ctx.maildirpp() && FolderKind::matches_inbox(folder) {
-            String::from("folder:\"\"")
-        } else {
-            format!("folder:{folder:?}")
-        };
+        let mut final_query = build_folder_query(config, ctx.maildirpp(), folder);
 
         if let Some(query) = opts.query.as_ref() {
             let query = query.to_notmuch_search_query();
             if !query.is_empty() {
-                final_query.push_str(" and ");
+                if final_query == "*" {
+                    final_query.clear();
+                } else {
+                    final_query.push_str(" and ");
+                }
                 final_query.push_str(&query);
             }
         }

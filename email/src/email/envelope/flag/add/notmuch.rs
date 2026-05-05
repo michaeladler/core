@@ -4,7 +4,10 @@ use tracing::{debug, info};
 
 use super::{AddFlags, Flags};
 use crate::{
-    email::error::Error, envelope::Id, flag::Flag, folder::FolderKind, notmuch::NotmuchContextSync,
+    email::error::Error,
+    envelope::Id,
+    flag::Flag,
+    notmuch::{build_folder_query, NotmuchContextSync},
     AnyResult,
 };
 
@@ -37,11 +40,7 @@ impl AddFlags for AddNotmuchFlags {
         let db = ctx.open_db()?;
 
         let ref folder = config.get_folder_alias(folder);
-        let folder_query = if ctx.maildirpp() && FolderKind::matches_inbox(folder) {
-            String::from("folder:\"\"")
-        } else {
-            format!("folder:{folder:?}")
-        };
+        let folder_query = build_folder_query(config, ctx.maildirpp(), folder);
         let mid_query = format!("mid:\"/^({})$/\"", id.join("|"));
         let query = [folder_query, mid_query].join(" and ");
         debug!("notmuch query: {query:?}");

@@ -17,6 +17,11 @@ pub enum Error {
     #[cfg(feature = "maildir")]
     #[error("cannot create notmuch folder {1}")]
     CreateFolderStructureNotmuchError(#[source] maildirs::Error, String),
+    #[cfg(feature = "notmuch")]
+    #[error(
+        "cannot create virtual notmuch folder {0:?} (alias resolves to a notmuch query: {1:?})"
+    )]
+    CreateVirtualNotmuchFolder(String, String),
     #[cfg(feature = "maildir")]
     #[error("cannot delete maildir folder {1} at {0}")]
     DeleteMaildirFolderError(#[source] maildirs::Error, String),

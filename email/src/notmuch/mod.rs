@@ -31,6 +31,7 @@ use crate::{
     folder::{
         add::{notmuch::AddNotmuchFolder, AddFolder},
         list::{notmuch::ListNotmuchFolders, ListFolders},
+        FolderKind,
     },
     maildir::{config::MaildirConfig, MaildirContext},
     message::{
@@ -83,6 +84,53 @@ impl NotmuchContext {
     pub fn maildirpp(&self) -> bool {
         self.notmuch_config.maildirpp
     }
+}
+
+/// Returns `true` if the string looks like a raw notmuch query.
+pub fn is_raw_notmuch_query(s: &str) -> bool {
+    // see man 7 notmuch-search-terms
+    const PREFIXES: &[&str] = &[
+        "*",
+        "tag:",
+        "is:",
+        "from:",
+        "to:",
+        "subject:",
+        "body:",
+        "folder:",
+        "path:",
+        "id:",
+        "mid:",
+        "thread:",
+        "attachment:",
+        "mimetype:",
+        "date:",
+        "lastmod:",
+        "query:",
+        "property:",
+        "sexp:",
+    ];
+
+    s.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .any(|tok| PREFIXES.iter().any(|p| tok.starts_with(p)))
+}
+
+/// Build the `folder:`-portion of a folder/alias query.
+pub fn build_folder_query(config: &AccountConfig, maildirpp: bool, folder: &str) -> String {
+    let resolved = config.get_folder_alias(folder);
+
+    if is_raw_notmuch_query(&resolved) {
+        if resolved == "*" {
+            return format!("{resolved}");
+        }
+        return format!("({resolved})");
+    }
+
+    if maildirpp && FolderKind::matches_inbox(&resolved) {
+        return String::from("folder:\"\"");
+    }
+
+    format!("folder:{resolved:?}")
 }
 
 /// The sync version of the Notmuch backend context.
@@ -285,5 +333,113 @@ impl CheckUp for CheckUpNotmuch {
         db.close().map_err(Error::CloseDatabaseError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use super::{build_folder_query, is_raw_notmuch_query};
+    use crate::{account::config::AccountConfig, folder::config::FolderConfig};
+
+    fn config_with_aliases(aliases: &[(&str, &str)]) -> Arc<AccountConfig> {
+        let mut map = HashMap::new();
+        for (k, v) in aliases {
+            map.insert((*k).to_owned(), (*v).to_owned());
+        }
+        Arc::new(AccountConfig {
+            folder: Some(FolderConfig {
+                aliases: Some(map),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn is_raw_notmuch_query_detects_simple_prefixes() {
+        assert!(is_raw_notmuch_query("*"));
+        assert!(is_raw_notmuch_query("tag:inbox"));
+        assert!(is_raw_notmuch_query("is:unread"));
+        assert!(is_raw_notmuch_query("from:alice@example.com"));
+        assert!(is_raw_notmuch_query("to:bob@example.com"));
+        assert!(is_raw_notmuch_query("subject:hello"));
+        assert!(is_raw_notmuch_query("date:today"));
+        assert!(is_raw_notmuch_query("folder:Sent"));
+        assert!(is_raw_notmuch_query("path:archive/**"));
+        assert!(is_raw_notmuch_query("thread:0000000000000abc"));
+    }
+
+    #[test]
+    fn is_raw_notmuch_query_detects_compound_queries() {
+        assert!(is_raw_notmuch_query("tag:inbox and not tag:trash"));
+        assert!(is_raw_notmuch_query("(tag:inbox or tag:flagged)"));
+        assert!(is_raw_notmuch_query("not tag:trash"));
+        assert!(is_raw_notmuch_query("from:alice and subject:meeting"));
+    }
+
+    #[test]
+    fn is_raw_notmuch_query_rejects_plain_folder_names() {
+        assert!(!is_raw_notmuch_query("INBOX"));
+        assert!(!is_raw_notmuch_query("Sent"));
+        assert!(!is_raw_notmuch_query("Archive/2024"));
+        assert!(!is_raw_notmuch_query(""));
+        assert!(!is_raw_notmuch_query("some folder with spaces"));
+        // looks similar but the prefix is not a recognized notmuch one
+        assert!(!is_raw_notmuch_query("custom:value"));
+    }
+
+    #[test]
+    fn build_folder_query_uses_alias_when_raw_query() {
+        let config = config_with_aliases(&[("inbox", "tag:inbox and not tag:trash")]);
+        // virtual folder: alias resolves to a raw notmuch query and
+        // should be wrapped in parentheses, not quoted as a folder.
+        assert_eq!(
+            build_folder_query(&config, false, "inbox"),
+            "(tag:inbox and not tag:trash)"
+        );
+        // maildir++ flag must not change behaviour for virtual folders
+        assert_eq!(
+            build_folder_query(&config, true, "inbox"),
+            "(tag:inbox and not tag:trash)"
+        );
+    }
+
+    #[test]
+    fn build_folder_query_handles_inbox_in_maildirpp() {
+        let config = Arc::new(AccountConfig::default());
+        // maildir++ stores the inbox at the maildir root, so the
+        // notmuch query must use an empty folder name.
+        assert_eq!(build_folder_query(&config, true, "INBOX"), "folder:\"\"");
+        // without maildir++, the inbox is just like any other folder.
+        assert_eq!(
+            build_folder_query(&config, false, "INBOX"),
+            "folder:\"INBOX\""
+        );
+    }
+
+    #[test]
+    fn build_folder_query_quotes_regular_folders() {
+        let config = Arc::new(AccountConfig::default());
+        assert_eq!(
+            build_folder_query(&config, false, "Sent"),
+            "folder:\"Sent\""
+        );
+        assert_eq!(
+            build_folder_query(&config, true, "Archive/2024"),
+            "folder:\"Archive/2024\""
+        );
+    }
+
+    #[test]
+    fn build_folder_query_resolves_non_query_alias() {
+        // alias that is just another folder name (not a raw query)
+        // should be resolved and quoted.
+        let config = config_with_aliases(&[("sent", "Sent Items")]);
+        assert_eq!(
+            build_folder_query(&config, false, "sent"),
+            "folder:\"Sent Items\""
+        );
     }
 }

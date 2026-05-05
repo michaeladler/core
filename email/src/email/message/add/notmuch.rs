@@ -7,7 +7,11 @@ use tracing::info;
 
 use super::{AddMessage, Flags};
 use crate::{
-    email::error::Error, envelope::SingleId, flag::Flag, notmuch::NotmuchContextSync, AnyResult,
+    email::error::Error,
+    envelope::SingleId,
+    flag::Flag,
+    notmuch::{is_raw_notmuch_query, NotmuchContextSync},
+    AnyResult,
 };
 
 static EXTRACT_FOLDER_FROM_QUERY: Lazy<Regex> =
@@ -48,10 +52,25 @@ impl AddMessage for AddNotmuchMessage {
 
         let folder_alias = &self.ctx.account_config.find_folder_alias(folder);
         let folder = match folder_alias {
-            Some(ref alias) => EXTRACT_FOLDER_FROM_QUERY
-                .captures(alias)
-                .map(|m| m[1].to_owned())
-                .unwrap_or(folder.to_owned()),
+            Some(ref alias) => {
+                // Special-case: alias values formatted as
+                // `folder:"X"` are unwrapped to the bare folder name
+                // `X`, allowing `add_message` to write to the
+                // underlying maildir.
+                if let Some(m) = EXTRACT_FOLDER_FROM_QUERY.captures(alias) {
+                    m[1].to_owned()
+                } else if is_raw_notmuch_query(alias) {
+                    // Any other raw notmuch query (e.g. `tag:unread`)
+                    // does not designate a real folder, so writing a
+                    // new message to it is not meaningful.
+                    return Err(Error::NotmuchVirtualFolderWrite(
+                        folder.to_owned(),
+                        alias.clone(),
+                    ))?;
+                } else {
+                    alias.clone()
+                }
+            }
             None => folder.to_owned(),
         };
 

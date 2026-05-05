@@ -2,7 +2,11 @@ use async_trait::async_trait;
 use tracing::info;
 
 use super::AddFolder;
-use crate::{folder::error::Error, notmuch::NotmuchContextSync, AnyResult};
+use crate::{
+    folder::error::Error,
+    notmuch::{is_raw_notmuch_query, NotmuchContextSync},
+    AnyResult,
+};
 
 pub struct AddNotmuchFolder {
     ctx: NotmuchContextSync,
@@ -30,9 +34,17 @@ impl AddFolder for AddNotmuchFolder {
         let config = &self.ctx.account_config;
         let ctx = self.ctx.lock().await;
 
+        let resolved = config.get_folder_alias(folder);
+        if is_raw_notmuch_query(&resolved) {
+            return Err(Error::CreateVirtualNotmuchFolder(
+                folder.to_owned(),
+                resolved,
+            ))?;
+        }
+
         ctx.mdir_ctx
             .root
-            .create(config.get_folder_alias(folder))
+            .create(resolved)
             .map_err(|e| Error::CreateFolderStructureNotmuchError(e, folder.to_owned()))?;
 
         Ok(())

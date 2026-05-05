@@ -3,7 +3,10 @@ use tracing::{debug, info};
 
 use super::RemoveMessages;
 use crate::{
-    email::error::Error, envelope::Id, folder::FolderKind, notmuch::NotmuchContextSync, AnyResult,
+    email::error::Error,
+    envelope::Id,
+    notmuch::{build_folder_query, NotmuchContextSync},
+    AnyResult,
 };
 
 #[derive(Clone)]
@@ -34,12 +37,7 @@ impl RemoveMessages for RemoveNotmuchMessages {
         let ctx = self.ctx.lock().await;
         let db = ctx.open_db()?;
 
-        let folder_query = if FolderKind::matches_inbox(folder) {
-            "folder:\"\"".to_owned()
-        } else {
-            let folder = config.get_folder_alias(folder);
-            format!("folder:{folder:?}")
-        };
+        let folder_query = build_folder_query(config, ctx.maildirpp(), folder);
         let mid_query = format!("mid:\"/^({})$/\"", id.join("|"));
         let query = [folder_query, mid_query].join(" and ");
         debug!("notmuch query: {query:?}");

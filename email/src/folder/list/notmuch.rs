@@ -2,7 +2,11 @@ use async_trait::async_trait;
 use tracing::info;
 
 use super::ListFolders;
-use crate::{folder::Folders, notmuch::NotmuchContextSync, AnyResult};
+use crate::{
+    folder::{Folder, Folders},
+    notmuch::{is_raw_notmuch_query, NotmuchContextSync},
+    AnyResult,
+};
 
 pub struct ListNotmuchFolders {
     ctx: NotmuchContextSync,
@@ -28,7 +32,25 @@ impl ListFolders for ListNotmuchFolders {
         info!("listing notmuch folders via maildir");
 
         let ctx = self.ctx.lock().await;
-        let folders = Folders::from_maildir_context(&ctx.mdir_ctx);
+        let mut folders = Folders::from_maildir_context(&ctx.mdir_ctx);
+
+        // Append user-defined folder aliases whose value is a raw
+        // notmuch query (e.g. `tag:unread`). These are virtual folders
+        // that do not exist on disk but are usable wherever a folder
+        // name is accepted.
+        if let Some(aliases) = ctx.account_config.get_folder_aliases() {
+            for (name, value) in aliases {
+                if is_raw_notmuch_query(value)
+                    && !folders.iter().any(|f| f.name.eq_ignore_ascii_case(name))
+                {
+                    folders.push(Folder {
+                        kind: None,
+                        name: name.clone(),
+                        desc: value.clone(),
+                    });
+                }
+            }
+        }
 
         Ok(folders)
     }

@@ -162,6 +162,11 @@ pub enum Error {
     #[cfg(feature = "notmuch")]
     #[error("notmuch failed: {0}")]
     NotMuchFailure(notmuch::Error),
+    #[cfg(feature = "notmuch")]
+    #[error(
+        "cannot perform write operation on virtual notmuch folder {0:?} (alias resolves to a notmuch query: {1:?})"
+    )]
+    NotmuchVirtualFolderWrite(String, String),
     #[error("process failed: {0}")]
     ProcessFailure(process::Error),
     #[cfg(feature = "maildir")]
