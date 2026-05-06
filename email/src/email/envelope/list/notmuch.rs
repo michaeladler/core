@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use chrono::TimeDelta;
+use notmuch::Sort;
 use tracing::{debug, info, trace};
 
 use super::{Envelopes, ListEnvelopes, ListEnvelopesOptions};
 use crate::{
     email::error::Error,
+    envelope::Envelope,
     notmuch::{build_folder_query, NotmuchContextSync},
     search_query::{filter::SearchEmailsFilterQuery, SearchEmailsQuery},
     AnyResult,
@@ -61,35 +63,99 @@ impl ListEnvelopes for ListNotmuchEnvelopes {
             .create_query(&final_query)
             .map_err(Error::NotMuchFailure)?;
 
-        let msgs = query_builder.search_messages().map_err(|err| {
-            Error::SearchMessagesInvalidQueryNotmuch(err, folder.to_owned(), final_query.clone())
-        })?;
+        // Ask notmuch to sort by newest-first server-side. This matches
+        // the default fallback ordering used by `sort_envelopes` (date
+        // descending) and lets us paginate the message iterator without
+        // materializing every matching message.
+        query_builder.set_sort(Sort::NewestFirst);
 
-        let mut envelopes = Envelopes::from_notmuch_msgs(msgs);
-
-        debug!(
-            "found {} notmuch envelopes matching query {final_query}",
-            envelopes.len()
-        );
-        trace!("{envelopes:#?}");
+        let has_custom_sort = opts
+            .query
+            .as_ref()
+            .and_then(|q| q.sort.as_ref())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
 
         let page_begin = opts.page * opts.page_size;
 
-        if page_begin > envelopes.len() {
-            return Err(Error::GetEnvelopesOutOfBoundsNotmuchError(
-                folder.to_owned(),
-                page_begin + 1,
-            ))?;
-        }
+        let mut envelopes = if has_custom_sort {
+            // Custom sort (by from/to/subject/...) requires every envelope
+            // to be materialized so we can sort in Rust.
+            let msgs = query_builder.search_messages().map_err(|err| {
+                Error::SearchMessagesInvalidQueryNotmuch(
+                    err,
+                    folder.to_owned(),
+                    final_query.clone(),
+                )
+            })?;
+            let mut envelopes = Envelopes::from_notmuch_msgs(msgs);
 
-        let page_end = envelopes.len().min(if opts.page_size == 0 {
-            envelopes.len()
+            debug!(
+                "found {} notmuch envelopes matching query {final_query}",
+                envelopes.len()
+            );
+            trace!("{envelopes:#?}");
+
+            if page_begin > envelopes.len() {
+                return Err(Error::GetEnvelopesOutOfBoundsNotmuchError(
+                    folder.to_owned(),
+                    page_begin + 1,
+                ))?;
+            }
+
+            opts.sort_envelopes(&mut envelopes);
+
+            let page_end = envelopes.len().min(if opts.page_size == 0 {
+                envelopes.len()
+            } else {
+                page_begin + opts.page_size
+            });
+
+            *envelopes = envelopes[page_begin..page_end].into();
+            envelopes
         } else {
-            page_begin + opts.page_size
-        });
+            // Default sort (date desc): use notmuch's native sort and only
+            // build envelopes for the requested page. Out-of-bounds is
+            // checked using a fast count query.
+            let total = query_builder
+                .count_messages()
+                .map_err(Error::NotMuchFailure)? as usize;
 
+            debug!("found {total} notmuch envelopes matching query {final_query}");
+
+            if page_begin > total {
+                return Err(Error::GetEnvelopesOutOfBoundsNotmuchError(
+                    folder.to_owned(),
+                    page_begin + 1,
+                ))?;
+            }
+
+            let msgs = query_builder.search_messages().map_err(|err| {
+                Error::SearchMessagesInvalidQueryNotmuch(
+                    err,
+                    folder.to_owned(),
+                    final_query.clone(),
+                )
+            })?;
+
+            let envelopes: Envelopes = if opts.page_size == 0 {
+                msgs.skip(page_begin)
+                    .map(Envelope::from_notmuch_msg)
+                    .collect()
+            } else {
+                msgs.skip(page_begin)
+                    .take(opts.page_size)
+                    .map(Envelope::from_notmuch_msg)
+                    .collect()
+            };
+
+            trace!("{envelopes:#?}");
+            envelopes
+        };
+
+        // Ensure final ordering matches the requested sort (no-op when
+        // notmuch already delivered them in the right order).
         opts.sort_envelopes(&mut envelopes);
-        *envelopes = envelopes[page_begin..page_end].into();
 
         db.close().map_err(Error::NotMuchFailure)?;
 
